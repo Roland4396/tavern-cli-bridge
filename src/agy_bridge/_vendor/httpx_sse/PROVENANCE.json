@@ -1,0 +1,11 @@
+{
+  "project": "https://github.com/florimondmanca/httpx-sse",
+  "version": "0.4.3",
+  "license": "MIT",
+  "source_modifications": false,
+  "sha256": {
+    "_decoders.py": "9dad57c9506208b6d113cb60d28ef5dd4e46cfe9bd7c1c583df48c9aeff19ecf",
+    "_models.py": "e16c06781106311da76d139367b3f2565bbb72199683bb5b909c97c9de434f1d"
+  },
+  "scope": "Standalone SSELineDecoder, SSEDecoder and ServerSentEvent only; no HTTPX transport"
+}

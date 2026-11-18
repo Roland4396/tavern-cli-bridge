@@ -1,0 +1,23 @@
+{
+  "root": "/state",
+  "request_root": "/tmp/requests",
+  "accounts_root": "/accounts",
+  "socket": "/run/agy/bridge.sock",
+  "enabled": false,
+  "native_enabled": false,
+  "gproxy_enabled": false,
+  "gproxy_url": "http://gproxy:8080/v1/chat/completions",
+  "gproxy_key_file": "/config/compat-key",
+  "api_key_file": "/config/client-key",
+  "native_accounts": [
+    "example"
+  ],
+  "native_default_account": "example",
+  "native_account_strategy": "fixed",
+  "native_nonstream_models": [
+    "gemini-4-carbon-low",
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-high"
+  ],
+  "gproxy_only_models": []
+}
