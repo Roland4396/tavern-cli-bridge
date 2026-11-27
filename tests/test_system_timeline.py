@@ -69,7 +69,7 @@ class TimelineTests(unittest.TestCase):
         original = copy.deepcopy(d)
         norm = validate({'model':'m','messages':d}, {'m':'m'}).body
         with tempfile.TemporaryDirectory() as root:
-            ses = native.Session(SimpleNamespace(runtime=Path(root)), norm,
+            ses = native.Session(SimpleNamespace(runtime=Path(root), store=SimpleNamespace(root=Path(root)/'store')), norm,
                                  SimpleNamespace(alias='test',expected_email=''), lambda: None)
             class ReachedSeed(Exception): pass
             def stop(home, work, system, history, **kwargs):

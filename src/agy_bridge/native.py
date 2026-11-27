@@ -23,6 +23,7 @@ from .protocol import seed, field, fields, account_session_ids
 from .system_timeline import split_system_messages
 from .tool_schema import SchemaRegistry
 from . import credentials
+from .workdirs import account_parent
 from .error_detail import redact
 from .event_queue import EventQueue
 
@@ -87,7 +88,8 @@ class NativeBackend:
 class Session:
     def __init__(self, backend, body, snapshot, check):
         self.backend, self.body, self.snapshot, self.check = backend, body, snapshot, check
-        self.temp = tempfile.TemporaryDirectory(prefix='request-', dir=backend.runtime)
+        parent = account_parent(backend.runtime, backend.store.root, snapshot.alias)
+        self.temp = tempfile.TemporaryDirectory(prefix='request-', dir=parent)
         self.base = Path(self.temp.name); self.home = self.base/'home'; self.work = self.base/'work'
         self.q = EventQueue(); self.ready = threading.Event(); self.proc = self.conn = self.reader = self.port = self.stream_socket = None
         self.reader_failure = None
@@ -227,6 +229,8 @@ class Session:
         if getattr(self.backend, 'quota_store', None):
             try: standing = self.backend.quota_store.standing(self.snapshot.alias, self.body['model'])
             except (OSError, ValueError, TypeError): standing = {'blocked_until': None}
+            if standing.get('blocked_without_reset'):
+                raise BridgeError(429, 'quota_exhausted', 'Official CLI metadata reports exhausted quota without a reset time', dispatch_blocked=True)
             if standing['blocked_until'] is not None:
                 raise BridgeError(429, 'quota_exhausted', 'Official CLI metadata reports exhausted quota; no model request was submitted',
                                   retry_after=max(1, int(standing['blocked_until']-time.time())+1), dispatch_blocked=True)

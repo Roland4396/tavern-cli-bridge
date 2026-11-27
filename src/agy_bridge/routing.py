@@ -108,14 +108,21 @@ class Hybrid:
                         plan = (native_plan or self.account_router.plan(model, reserved=reserved)) if cli_allowed else None
                         available, errors = self.ready_backends(plan, cli_allowed=cli_allowed)
                         # An intended CLI-pool request waits for busy accounts and
-                        # reports pool guards instead of silently using the compatibility backend.
+                        # reports pool guards instead of silently using Gproxy12.
                         # Tool-incompatible requests retain their existing explicit
                         # Gproxy compatibility route before any CLI submission.
                         if cli_allowed and self.native.enabled and self.account_router.strategy == 'earliest_reset' and 'cli' not in available:
                             failure = plan.error or errors.get('cli')
-                            if failure is None or failure.code == 'accounts_busy':
-                                self.cv.wait(.05); continue
-                            raise failure
+                            # Dynamic catalogue mode may admit a new 4H turn to an
+                            # available compatibility backend on local capacity or
+                            # catalogue absence only. Never fail over a provider rejection.
+                            local_capacity = failure is None or failure.code in ('accounts_busy','no_catalog_candidate')
+                            use_compat = (model in getattr(self.account_router, 'catalog_models', ())
+                                          and model in self.gproxy_models and 'gproxy' in available and local_capacity)
+                            if not use_compat:
+                                if failure is None or failure.code == 'accounts_busy':
+                                    self.cv.wait(.05); continue
+                                raise failure
                         # Prefer CLI. Its cross-process lease/refresh guard is checked
                         # locally, without starting a CLI or making a quota read.
                         if cli_allowed and 'cli' in available: selected = 'cli'

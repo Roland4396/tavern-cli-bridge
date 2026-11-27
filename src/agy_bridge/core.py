@@ -215,13 +215,19 @@ def upstream_error(raw, secrets=()):
         return result(403, 'service_disabled', 'The upstream disabled this account; it will not be dispatched again.', **({'appeal_url': redact(appeal, secrets)[0]} if appeal else {}), reason='TOS_VIOLATION')
     if 'Eligibility check failed:' in encoded and (code in (502, 503, 504) or (code is None and message.rstrip().endswith(': Bad Gateway'))):
         return result(code or 502, 'cli_transport_error', 'CLI initialization transport failed; this is not an account eligibility rejection.')
-    if 'Eligibility check failed:' in encoded:
-        location = 'not currently available in your location' in encoded
+    eligibility_check = 'Eligibility check failed:' in encoded
+    location = 'not currently available in your location' in encoded
+    # A credential rejection applies to this request. It is not evidence of
+    # account ineligibility and must not create a durable permission flag.
+    if (code == 401 or (code is None and symbolic == 'UNAUTHENTICATED')) and not (
+            eligibility_check and (location or native_reason in ('LOCATION_UNAVAILABLE', 'CLI_INELIGIBLE'))):
+        return result(401, 'upstream_unauthenticated', 'The upstream did not accept the authentication credential for this request.')
+    if eligibility_check:
         return result(403, 'account_permission_denied', 'Official CLI eligibility check rejected this account.',
                       reason='LOCATION_UNAVAILABLE' if location else 'CLI_INELIGIBLE')
     if code == 429 or (code is None and 'RESOURCE_EXHAUSTED' in encoded.upper()):
         return result(429, 'rate_limited', 'The selected account is rate limited; no automatic retry or account fallback.', retry_after=retry or 60)
-    if code in (401, 403) or (code is None and 'PERMISSION_DENIED' in encoded.upper()):
+    if code == 403 or (code is None and 'PERMISSION_DENIED' in encoded.upper()):
         return result(code or 403, 'account_permission_denied', 'The selected account needs authorization or permission review.')
     return result(code or 502, 'upstream_error', 'The CLI upstream request failed.')
 

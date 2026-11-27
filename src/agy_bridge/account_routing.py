@@ -8,7 +8,8 @@ import time
 import json
 from . import account_store as accounts
 from .core import BridgeError
-from .quota import QuotaStore
+from .quota import QuotaStore, CATALOG_ROUTABLE
+from .models import EXPLICIT_NATIVE
 
 @dataclass(frozen=True)
 class AccountPlan:
@@ -21,7 +22,7 @@ class AccountPlan:
     candidates: tuple = ()
 
 class AccountRouter:
-    def __init__(self, native, *, allowed, default, model_accounts=None, models=(), strategy='fixed'):
+    def __init__(self, native, *, allowed, default, model_accounts=None, models=(), strategy='fixed', catalog_models=()):
         if not isinstance(allowed, (list, tuple)) or not allowed or len(allowed) > 64:
             raise ValueError('native_accounts must be a nonempty list of at most 64 aliases')
         if any(not isinstance(a, str) or not accounts.ALIAS.fullmatch(a) for a in allowed) or len(set(allowed)) != len(allowed):
@@ -37,6 +38,10 @@ class AccountRouter:
                 raise ValueError('Model pools must contain unique allowed accounts')
             if strategy == 'fixed' and len(pool) != 1: raise ValueError('Fixed strategy needs one account per model')
             normalized[model] = tuple(pool)
+        if (not isinstance(catalog_models, (tuple, list)) or not set(catalog_models) <= CATALOG_ROUTABLE & set(models)
+                or set(catalog_models) & set(normalized) or (catalog_models and strategy != 'earliest_reset')):
+            raise ValueError('Invalid dynamic catalogue binding')
+        self.catalog_models = frozenset(catalog_models)
         self.native = native; self.allowed = tuple(allowed); self.default = default
         self.strategy = strategy; self.models = tuple(sorted(models)); self.model_accounts = MappingProxyType(normalized)
         self.quotas = QuotaStore(native.root)
@@ -46,20 +51,32 @@ class AccountRouter:
         legacy = cfg.get('account'); allowed = cfg.get('native_accounts', [legacy] if legacy else [])
         return cls(native, allowed=allowed, default=cfg.get('native_default_account', legacy),
                    model_accounts=cfg.get('native_model_accounts'), models=models,
-                   strategy=cfg.get('native_account_strategy', 'fixed'))
-    def pool_for(self, model):
+                   strategy=cfg.get('native_account_strategy', 'fixed'), catalog_models=cfg.get('native_catalog_models', ()))
+    def pool_for(self, model, *, state=None):
+        if model in self.catalog_models:
+            snapshots = (self.quotas.read() if state is None else state).get('enabled_catalogs', {})
+            return tuple(a for a in self.allowed if model in snapshots.get(a, {}).get('models', ()))
+        if model in EXPLICIT_NATIVE: return self.model_accounts.get(model, ())
         return self.model_accounts.get(model, (self.default,) if self.strategy == 'fixed' else self.allowed)
     def counters(self):
         return json.loads(self.counter_path.read_text()) if self.counter_path.exists() else {}
     def plan(self, model, reserved=None):
         reserved = reserved or {}; eligible = []; errors = []; busy = False
         try: quota_state = self.quotas.read()
-        except (OSError, ValueError): quota_state = {}
+        except (OSError, ValueError):
+            if model in self.catalog_models:
+                return AccountPlan('', error=BridgeError(503, 'cli_unavailable', 'Native catalogue store unavailable'), model=model)
+            quota_state = {}
         now = time.time()
-        for alias in self.pool_for(model):
+        pool = self.pool_for(model, state=quota_state)
+        if model in self.catalog_models and not pool:
+            return AccountPlan('', error=BridgeError(503, 'no_catalog_candidate', 'No enabled native account catalogue advertises this model'), model=model)
+        for alias in pool:
             try:
                 snap = self.native.resolve(alias); self.native.check_account(alias, model)
                 standing = self.quotas.standing(alias, model, quota_state, now)
+                if standing.get('blocked_without_reset'):
+                    raise BridgeError(429, 'quota_exhausted', 'Provider quota is unavailable until refreshed', dispatch_blocked=True)
                 if standing['blocked_until'] is not None:
                     raise BridgeError(429, 'quota_exhausted', 'All applicable quota must be available before dispatch',
                                       retry_after=max(1, int(standing['blocked_until']-now)+1), dispatch_blocked=True)
@@ -109,13 +126,17 @@ class AccountRouter:
             for model in self.models:
                 try:
                     self.native.check_account(alias, model)
-                    state = 'quota_exhausted' if row['quota'][model]['blocked_until'] is not None else 'eligible'
+                    if model in self.catalog_models and alias not in self.pool_for(model, state=quota_state):
+                        row['model_dispatch_status'][model] = 'not_in_enabled_catalog'
+                        continue
+                    state = 'quota_exhausted' if row['quota'][model]['blocked_until'] is not None or row['quota'][model].get('blocked_without_reset') else 'eligible'
                 except BridgeError as exc: state = exc.code
                 except (OSError, accounts.AccountError): state = 'cli_unavailable'
                 row['model_dispatch_status'][model] = state
             rows.append(row)
         routes = {k:(v[0] if self.strategy == 'fixed' else list(v)) for k,v in self.model_accounts.items()}
-        return {'default_account': self.default if self.strategy == 'fixed' else None, 'model_accounts': routes, 'strategy': self.strategy,
+        routes.update({m:list(self.pool_for(m,state=quota_state)) for m in self.catalog_models})
+        return {'catalog_routed_models': sorted(self.catalog_models), 'default_account': self.default if self.strategy == 'fixed' else None, 'model_accounts': routes, 'strategy': self.strategy,
                 'configured_accounts': rows, 'selection': 'server_owned_at_admission',
                 'automatic_account_selection': self.strategy != 'fixed', 'automatic_account_rotation': self.strategy != 'fixed',
                 'account_switch_after_dispatch': False,
